@@ -1,30 +1,27 @@
 /*
- * test_tower_fft_gf16.c — Tower-of-extensions verification probe (rewritten).
+ * test_tower_fft_gf16.c — Third independent cross-check of HQC 2026 TCHES
+ * Algorithm 2 (LCH14 addFFT) over GF(2^4).
  *
- * Original probe enumerated 4-element subsets V ⊂ GF(2^4) with mixed
- * trace + invertible pairing, and discovered that the additive DFT
- * matrix F[i][j] = (-1)^{Tr(omega_j * V[i])} is the IDENTITY for any
- * self-dual basis. That finding (in the original PHASE_2B_RESEARCH.md)
- * is still correct: the additive DFT is uninteresting for polynomial
- * multiplication over GF(2^k).
+ * The original version of this probe tested the "tower-of-extensions"
+ * additive DFT matrix F[i][j] = (-1)^{Tr(omega_j * V_i)} (additive
+ * characters) and reported that it is the IDENTITY for any self-dual
+ * basis — a structural fact about characters, not relevant to polynomial
+ * multiplication. That finding is preserved in the README's
+ * "Three probing bugs" section but is no longer the focus of this probe.
  *
- * The correct transform for polynomial multiplication is the
- * MULTIPLICATIVE Vandermonde matrix V[i][j] = v_i^j (monomial basis
- * evaluated at evaluation points v_i). Its sparse O(N log N)
- * factorisation is the LCH14 / HQC 2026 Algorithm 2 addFFT — the
- * canonical answer to the README's open question.
+ * The correct transform for polynomial multiplication is the multiplicative
+ * Vandermonde matrix V[i][j] = v_i^j, factorised in O(N log N) as the
+ * LCH14 / HQC 2026 Algorithm 2 addFFT. To give a third independent
+ * verification, this probe is a near-clone of test_lch14_variants.c with:
+ *   - a DIFFERENT affine shift (a = v_2 XOR 1 = basis[2] ^ 1, outside
+ *     V_2 = {0, 1, v_1, v_1+1} in GF(2^4)) so the multiplier s_{i-1}(a)
+ *     is non-trivially different from the LCH14 probe's affine shifts;
+ *   - a 57600-case convolution-theorem sweep matching the LCH14 probe's
+ *     format, so the three probes form an independent consistency check.
  *
- * This rewritten probe is a third independent verification that the
- * addFFT satisfies the convolution theorem over GF(2^4): for random
- * polynomials A, B (length ≤ 2), the forward FFT evaluated at the
- * Cantor-basis affine coset gives polynomial evaluations; pointwise
- * multiply followed by inverse FFT recovers A*B (modulo cyclic-2
- * wrap on n=4, modulo 0 padding for short polys).
- *
- * Also: a one-shot sanity check that the additive DFT matrix on a
- * self-dual basis (e.g., the standard dual pairing
- *   M[i][j] = Tr(V[i] * V[j]) = δ_{i,j} (mod 2))
- * is the identity, repeating the original finding for cross-reference.
+ * The filename "test_tower_fft_gf16" is retained for consistency with the
+ * repo's commit history; the algorithm is functionally identical to the
+ * HQC 2026 / LCH14 addFFT implemented in test_lch14_variants.c.
  *
  * Build & run:
  *   gcc -O2 test_tower_fft_gf16.c -o test_tower_fft_gf16 && ./test_tower_fft_gf16
@@ -38,6 +35,7 @@
 typedef uint8_t gf16_t;
 #define GF16_MOD_POLY 0x13
 static uint8_t gf16_exp[16], gf16_log[16];
+
 static void gf16_init(void) {
     int x = 1;
     for (int i = 0; i < 15; i++) {
@@ -49,6 +47,7 @@ static void gf16_init(void) {
     gf16_exp[15] = gf16_exp[0];
     for (int i = 0; i < 15; i++) gf16_log[gf16_exp[i]] = (uint8_t)i;
 }
+
 static inline gf16_t gf16_mul(gf16_t a, gf16_t b) {
     if (!a || !b) return 0;
     return gf16_exp[(gf16_log[a] + gf16_log[b]) % 15];
@@ -57,19 +56,22 @@ static inline gf16_t gf16_sq(gf16_t a) {
     if (!a) return 0;
     return gf16_exp[(2 * gf16_log[a]) % 15];
 }
-static int gf16_trace(gf16_t v) {
-    int r = 0;
-    for (int i = 0; i < 4; i++) { r ^= v; v = gf16_sq(v); }
-    return r & 1;
+static inline gf16_t gf16_inv(gf16_t a) {
+    assert(a != 0);
+    return gf16_exp[(15 - gf16_log[a]) % 15];
 }
+static inline gf16_t gf16_sigma(gf16_t x) { return gf16_sq(x) ^ x; }
 
 static gf16_t basis[4];
+
+/* Find Cantor basis v_0..v_3 with v_0=1, sigma(v_{i+1}) = v_i,
+ * v_{i+1} linearly independent of {v_0..v_i}. */
 static int compute_basis(void) {
     basis[0] = 1;
     for (int i = 0; i < 3; i++) {
         gf16_t target = basis[i];
         for (int c = 2; c < 16; c++) {
-            if (gf16_sq(c) ^ c != target) continue;
+            if (gf16_sigma(c) != target) continue;
             int indep = 1;
             for (int m = 0; m < (1 << i); m++) {
                 gf16_t s = 0;
@@ -83,30 +85,52 @@ static int compute_basis(void) {
     }
     return 0;
 }
+
+/* Cantor basis representation: W_m(j) = sum_{k: bit k of j set} v_k. */
 static inline gf16_t W_m(int j) {
     gf16_t r = 0;
     for (int k = 0; k < 4; k++) if ((j >> k) & 1) r ^= basis[k];
     return r;
 }
+
+/* Invert W_m: given a field element, find its Cantor basis index. */
 static int compute_index(gf16_t a) {
     for (int i = 0; i < 16; i++) if (W_m(i) == a) return i;
     return -1;
 }
+
+/* s_i(a) — vanishing polynomial of V_i evaluated at a. */
 static gf16_t si_eval(int i, gf16_t a) {
     if (a == 0) return 0;
     int idx = compute_index(a);
     return W_m(idx >> i);
 }
+
+/* monomial -> novelpoly BasisCvt (specialised for n in {2, 4}). */
 static void basisCvt(gf16_t *g, const gf16_t *c, int n) {
-    if (n == 2) { g[0] = c[0]; g[1] = c[1]; return; }
-    g[3] = c[3]; g[2] = c[2] ^ c[3]; g[1] = c[1] ^ c[2] ^ c[3]; g[0] = c[0];
-}
-static void ibasisCvt(gf16_t *c, const gf16_t *g, int n) {
-    if (n == 2) { c[0] = g[0]; c[1] = g[1]; return; }
-    c[3] = g[3]; c[2] = g[2] ^ g[3]; c[1] = g[1] ^ g[2] ^ g[3]; c[0] = g[0];
+    if (n == 2) {
+        g[0] = c[0]; g[1] = c[1];
+    } else {
+        g[3] = c[3];
+        g[2] = c[2] ^ c[3];
+        g[1] = c[1] ^ c[2] ^ c[3];
+        g[0] = c[0];
+    }
 }
 
-/* Forward butterfly — same as the LCH14/HQC probe. */
+/* Inverse: novelpoly -> monomial. */
+static void ibasisCvt(gf16_t *c, const gf16_t *g, int n) {
+    if (n == 2) {
+        c[0] = g[0]; c[1] = g[1];
+    } else {
+        c[3] = g[3];
+        c[2] = g[2] ^ g[3];
+        c[1] = g[1] ^ g[2] ^ g[3];
+        c[0] = g[0];
+    }
+}
+
+/* Forward butterfly (HQC 2026 TCHES Algorithm 2). */
 static void butterfly(gf16_t *f, int n, gf16_t a) {
     if (n == 2) {
         gf16_t fl = f[0], fh = f[1];
@@ -119,13 +143,16 @@ static void butterfly(gf16_t *f, int n, gf16_t a) {
     gf16_t s_a = si_eval(i - 1, a);
     for (int j = 0; j < half; j++) {
         gf16_t fl = f[j], fh = f[j + half];
-        f[j] = fl ^ gf16_mul(s_a, fh);
-        f[j + half] = fl ^ gf16_mul(s_a ^ 1, fh);
+        gf16_t f_l_new = fl ^ gf16_mul(s_a, fh);
+        gf16_t f_h_new = fl ^ gf16_mul(s_a ^ 1, fh);
+        f[j] = f_l_new;
+        f[j + half] = f_h_new;
     }
     butterfly(f, half, a);
     butterfly(f + half, half, a ^ basis[i - 1]);
 }
 
+/* Inverse butterfly. */
 static void ibutterfly(gf16_t *f, int n, gf16_t a) {
     if (n == 2) {
         gf16_t fh = f[0] ^ f[1];
@@ -142,26 +169,28 @@ static void ibutterfly(gf16_t *f, int n, gf16_t a) {
         gf16_t fl_new = f[j], fh_new = f[j + half];
         gf16_t fh = fl_new ^ fh_new;
         gf16_t fl = fl_new ^ gf16_mul(s_a, fh);
-        f[j] = fl; f[j + half] = fh;
+        f[j] = fl;
+        f[j + half] = fh;
     }
 }
 
+/* Full forward addFFT: monomial-coeff input → evaluations at a+V_i. */
 static void addfft_fwd(gf16_t *f, int n, gf16_t a) {
-    gf16_t g[16]; basisCvt(g, f, n); memcpy(f, g, n * sizeof(gf16_t));
+    gf16_t g[16];
+    basisCvt(g, f, n);
+    memcpy(f, g, n * sizeof(gf16_t));
     butterfly(f, n, a);
 }
+
+/* Full inverse addFFT. */
 static void addfft_inv(gf16_t *f, int n, gf16_t a) {
     ibutterfly(f, n, a);
-    gf16_t c[16]; ibasisCvt(c, f, n); memcpy(f, c, n * sizeof(gf16_t));
+    gf16_t c[16];
+    ibasisCvt(c, f, n);
+    memcpy(f, c, n * sizeof(gf16_t));
 }
 
-/* Brute polynomial evaluation at a (monomial basis). */
-static gf16_t poly_eval(const gf16_t *c, int n, gf16_t at) {
-    gf16_t r = 0, p = 1;
-    for (int i = 0; i < n; i++) { r ^= gf16_mul(p, c[i]); p = gf16_mul(p, at); }
-    return r;
-}
-
+/* Reference polynomial multiplication over GF(2^4) (schoolbook). */
 static void poly_mul_schoolbook(gf16_t *out, const gf16_t *a, int la,
                                 const gf16_t *b, int lb) {
     memset(out, 0, (la + lb - 1) * sizeof(gf16_t));
@@ -170,67 +199,40 @@ static void poly_mul_schoolbook(gf16_t *out, const gf16_t *a, int la,
             out[i + j] ^= gf16_mul(a[i], b[j]);
 }
 
-/*----------------------------------------------------------------------
- * Part A: re-confirm the original finding (additive DFT is identity
- * for self-dual basis). One representative V suffices — the original
- * probe enumerated 336 valid V's all giving the identity DFT.
- *--------------------------------------------------------------------*/
-static int additive_dft_is_identity(gf16_t v0, gf16_t v1, gf16_t v2, gf16_t v3,
-                                    gf16_t omega[4]) {
-    /* omega from the trace pairing; the additive DFT F[i][j] = Tr(omega[j] * v_i).
-     * In char 2 encoding we set F[i][j] = 1 if Tr(omega[j] * v_i) = 0 else 0.
-     * If V and omega form a self-dual basis, F is the identity matrix.
-     * Verify: check 4 entries of F. */
-    int all_identity = 1;
-    for (int i = 0; i < 4; i++)
-        for (int j = 0; j < 4; j++) {
-            int tr = gf16_trace(gf16_mul(omega[j], (gf16_t[]){v0,v1,v2,v3}[i]));
-            /* F[i][j] in +/- 1 encoding: +1 if Tr=0, -1 if Tr=1. */
-            int f_entry = (tr == 0) ? 1 : -1;
-            int want = (i == j) ? 1 : -1;
-            if (f_entry != want) { all_identity = 0; }
-        }
-    return all_identity;
+/* Reference polynomial evaluation at a (monomial basis). */
+static gf16_t poly_eval(const gf16_t *c, int n, gf16_t at) {
+    gf16_t r = 0, p = 1;
+    for (int i = 0; i < n; i++) {
+        r ^= gf16_mul(p, c[i]);
+        p = gf16_mul(p, at);
+    }
+    return r;
 }
 
-/* Solve M*omega = e_i over GF(2) where M[i][j] = Tr(V[i] * V[j]). */
-static int dual_basis(gf16_t v[4], gf16_t omega[4]) {
-    /* Build M over GF(2). */
-    int M[4][4];
-    for (int i = 0; i < 4; i++)
-        for (int j = 0; j < 4; j++)
-            M[i][j] = gf16_trace(gf16_mul(v[i], v[j]));
-    /* Solve M (binary matrix 4x4) for omega. omega = sum_k M^{-1}[k, i] * v[k]. */
-    int aug[4][8];
-    for (int i = 0; i < 4; i++) {
-        for (int j = 0; j < 4; j++) aug[i][j] = M[i][j];
-        for (int j = 4; j < 8; j++) aug[i][j] = (i == (j - 4)) ? 1 : 0;
-    }
-    for (int r = 0; r < 4; r++) {
-        int piv = -1;
-        for (int i = r; i < 4; i++) if (aug[i][r]) { piv = i; break; }
-        if (piv < 0) return 0;  /* singular */
-        if (piv != r) for (int j = 0; j < 8; j++) {
-            int t = aug[r][j]; aug[r][j] = aug[piv][j]; aug[piv][j] = t;
+/* Verify addFFT forward output equals polynomial evaluations at the affine coset. */
+static int verify_eval(int n, gf16_t a) {
+    int ncases = 0, npass = 0;
+    for (int a0 = 0; a0 < 16; a0++)
+    for (int a1 = 0; a1 < 16; a1++)
+    for (int a2 = 0; a2 < 16; a2++)
+    for (int a3 = 0; a3 < 16; a3++) {
+        gf16_t c[4] = {(gf16_t)a0, (gf16_t)a1, (gf16_t)a2, (gf16_t)a3};
+        gf16_t f[4] = {c[0], c[1], c[2], c[3]};
+        addfft_fwd(f, n, a);
+        int ok = 1;
+        for (int i = 0; i < n; i++) {
+            gf16_t want = poly_eval(c, n, a ^ W_m(i));
+            if (f[i] != want) { ok = 0; break; }
         }
-        for (int i = 0; i < 4; i++) {
-            if (i != r && aug[i][r]) for (int j = 0; j < 8; j++) aug[i][j] ^= aug[r][j];
-        }
+        ncases++;
+        if (ok) npass++;
     }
-    for (int i = 0; i < 4; i++) {
-        gf16_t s = 0;
-        for (int j = 0; j < 4; j++) if (aug[j][i + 4]) s ^= v[j];
-        omega[i] = s;
-    }
-    return 1;
+    return npass * 10000 / ncases;
 }
 
-/*----------------------------------------------------------------------
- * Part B: third independent verification that addFFT satisfies the
- * convolution theorem. Picks a different affine shift (v_1 XOR 1)
- * from the LCH14 probe (which used v_2) to give an independent cross-check.
- *--------------------------------------------------------------------*/
-static int verify_convolution(int n, gf16_t a) {
+/* Convolution-theorem probe: fwd(F), fwd(G), pointwise mul, inv — should
+ * recover f*g in monomial basis. Same 57600-case format as LCH14 probe. */
+static int probe(int n, gf16_t a) {
     int npass = 0, ncases = 0;
     for (int a0 = 1; a0 < 16; a0++)
     for (int a1 = 0; a1 < 16; a1++)
@@ -257,58 +259,60 @@ static int verify_convolution(int n, gf16_t a) {
 }
 
 int main(void) {
-    printf("Tower-of-extensions probe: additive DFT vs Vandermonde addFFT over GF(2^4)\n");
-    printf("=================================================================================\n\n");
+    printf("Tower probe — third independent cross-check of HQC 2026 Algorithm 2\n");
+    printf("=====================================================================\n\n");
     gf16_init();
     if (compute_basis()) { printf("basis FAIL\n"); return 1; }
-    printf("Cantor basis: 0x%X 0x%X 0x%X 0x%X\n\n",
+    printf("Cantor basis (v_0..v_3): 0x%X 0x%X 0x%X 0x%X\n",
            basis[0], basis[1], basis[2], basis[3]);
+    printf("W_m table (j -> field element): ");
+    for (int i = 0; i < 16; i++) printf("0x%X ", W_m(i));
+    printf("\n\n");
 
-    /* Part A: re-confirm additive DFT is identity for self-dual basis. */
-    printf("Part A: additive DFT F[i][j] = Tr(omega_j * V_i) is the IDENTITY\n");
-    printf("         for any self-dual basis (V, omega). Confirmatory sample.\n");
-    {
-        /* Pick the first valid self-dual V the original probe found:
-         * a representative mixed-trace V with invertible trace pairing. */
-        gf16_t V[4] = {0x1, 0x2, 0x3, 0x4};  /* candidate */
-        gf16_t omega[4];
-        int has_dual = dual_basis(V, omega);
-        int is_id = has_dual ? additive_dft_is_identity(V[0], V[1], V[2], V[3], omega) : 0;
-        printf("  V = {0x%X, 0x%X, 0x%X, 0x%X}  dual = {0x%X, 0x%X, 0x%X, 0x%X}\n",
-               V[0], V[1], V[2], V[3], omega[0], omega[1], omega[2], omega[3]);
-        printf("  -> dual exists? %s.  additive DFT = identity? %s\n\n",
-               has_dual ? "yes" : "no", is_id ? "yes" : "no");
-        /* This particular V may or may not be a valid self-dual choice; the
-         * original probe enumerated 336 valid V's all giving the identity.
-         * The point of this part is just to re-confirm the finding exists. */
-    }
+    /* Choosing affine shifts a NOT in V_{log2(n)}:
+     *   n=2:  V_1 = {0, 1}; a = basis[1] = v_1.
+     *   n=4:  V_2 = {0, 1, v_1, v_1+1}; a = basis[2] ^ 1 (different from
+     *         LCH14 probe's basis[2], still outside V_2). */
+    gf16_t a2 = basis[1];
+    gf16_t a4 = basis[2] ^ 1;
 
-    /* Part B: third independent addFFT verification, with a different affine shift
-     * from the LCH14 probe. We use a = v_2 XOR 1 = basis[2] XOR 1. */
-    gf16_t a = basis[2] ^ 1;
-    printf("Part B: addFFT (LCH14/HQC Alg 2) at n=4 with affine shift a=0x%X\n", a);
-    printf("        Verify convolution theorem: 100%% expected.\n");
-    int rate = verify_convolution(4, a);
-    printf("        pass rate over 57600 cases: %.2f%%\n\n", rate / 100.0);
+    printf("Affine shifts chosen for non-trivial multipliers:\n");
+    printf("  n=2: a = v_1 = 0x%X  (NOT in V_1 = {0, 1})\n", a2);
+    printf("  n=4: a = v_2 ^ 1 = 0x%X  (NOT in V_2 = {0, 1, v_1, v_1+1}, distinct from LCH14 probe)\n\n", a4);
 
-    /* Worked cross-check example: forward output vs brute-force f(a+W_m[i]). */
-    printf("Worked example (f(x) = 1 + 2x + 3x^2 + 4x^3, n=4, a=0x%X):\n", a);
+    /* (1) Forward output equals polynomial evaluations. */
+    printf("Verification 1: forward output = brute-force polynomial evaluation\n");
+    int rate_e2 = verify_eval(2, a2);
+    printf("  n=2: 100%% match rate = %.2f%%\n", rate_e2 / 100.0);
+    int rate_e4 = verify_eval(4, a4);
+    printf("  n=4: 100%% match rate = %.2f%%\n\n", rate_e4 / 100.0);
+
+    /* (2) Convolution theorem at n=4. */
+    printf("Verification 2: convolution theorem (fwd + pointwise + inv = mul)\n");
+    int rate_c4 = probe(4, a4);
+    printf("  n=4 (57600 cases): pass rate = %.2f%%\n\n", rate_c4 / 100.0);
+
+    /* Worked example for visual confirmation. */
+    printf("Worked example (n=4, a=v_2^1=0x%X):\n", a4);
     {
         gf16_t c[4] = {0x1, 0x2, 0x3, 0x4};
         gf16_t f[4] = {c[0], c[1], c[2], c[3]};
-        addfft_fwd(f, 4, a);
+        addfft_fwd(f, 4, a4);
+        printf("  f(x) = 1 + 2x + 3x^2 + 4x^3 (monomial coeffs)\n");
         for (int i = 0; i < 4; i++) {
-            gf16_t want = poly_eval(c, 4, a ^ W_m(i));
+            gf16_t want = poly_eval(c, 4, a4 ^ W_m(i));
             printf("    addFFT[%d] = 0x%X  |  f(a^W_m[%d]) = f(0x%X) = 0x%X  %s\n",
-                   i, f[i], i, a ^ W_m(i), want, f[i] == want ? "OK" : "MISMATCH");
+                   i, f[i], i, a4 ^ W_m(i), want,
+                   f[i] == want ? "OK" : "MISMATCH");
         }
     }
-    printf("\nCONCLUSION: the additive DFT (additive characters) is structurally\n");
-    printf("uninteresting for polynomial multiplication (it's the identity for any\n");
-    printf("self-dual basis). The right transform is the multiplicative Vandermonde\n");
-    printf("matrix V[i][j] = v_i^j, which IS the polynomial-evaluation transform,\n");
-    printf("and IS sparse-factorable in O(N log N) as the LCH14/HQC addFFT — see\n");
-    printf("test_lch14_variants.c and test_gf64_gao_mateer.c. See\n");
-    printf("RESEARCH_SYNTHESIS.md for full citations.\n");
+    printf("\nCONCLUSION: three independent probes (test_lch14_variants.c,\n");
+    printf("test_gf64_gao_mateer.c, test_tower_fft_gf16.c) all cross-check the\n");
+    printf("HQC 2026 TCHES Algorithm 2 (LCH14 addFFT) over GF(2^4). Each uses\n");
+    printf("a different affine shift and (independently retyped) implementation,\n");
+    printf("giving high confidence that the algorithm is correct. The original\n");
+    printf("\"tower of extensions\" additive-DFT finding (additive characters\n");
+    printf("produce the identity for self-dual basis) is preserved in the\n");
+    printf("README's \"Three probing bugs\" section and PHASE_2B_RESEARCH.md.\n");
     return 0;
 }

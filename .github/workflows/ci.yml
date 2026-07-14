@@ -71,8 +71,10 @@ jobs:
           ./test_tower_fft_gf16
           echo "=== end test_tower_fft_gf16 ==="
           # Independent cross-check at the third probe's affine shift.
-          ./test_tower_fft_gf16 | grep -F "pass rate over 57600 cases: 100.00%" >/dev/null
-          echo "OK: test_tower_fft_gf16 — 100% pass."
+          ./test_tower_fft_gf16 | grep -F "n=4 (57600 cases): pass rate = 100.00%" >/dev/null
+          ./test_tower_fft_gf16 | grep -F "n=2: 100% match rate = 100.00%" >/dev/null
+          ./test_tower_fft_gf16 | grep -F "n=4: 100% match rate = 100.00%" >/dev/null
+          echo "OK: test_tower_fft_gf16 — 100% pass on forward-output and convolution probes."
 
       - name: Summary
         run: echo "All additive-FFT probes at GF(2^4) pass the convolution-theorem probe at 100%."
