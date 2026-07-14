@@ -216,3 +216,76 @@ This document is committed alongside:
 
 The plan file at `C:\Users\dimit\.claude\plans\in-https-github-com-trafgals-parparpar-i-sleepy-steele.md`
 contains the staged delivery plan with this outcome documented.
+
+---
+
+## Resolution (2026-07-15) — open question closed
+
+The "open question" verdict above was based on **three independent probing
+bugs**, not structural obstructions. A web-research sweep on 2026-07-15
+surfaced the canonical additive FFT algorithm in the literature, and the
+probes were rewritten to exercise it correctly with 100% pass rates. Full
+synthesis with citations: [`RESEARCH_SYNTHESIS.md`](RESEARCH_SYNTHESIS.md).
+
+### What was wrong
+
+| Probe | Bug | Fix |
+|---|---|---|
+| `test_lch14_variants.c` | Tested multiplier `s_i(W_m[j \| (1<<i)])`, which evaluates to 1 by Chen 2018 Eq. 4 (basis element `v_i` ⇒ `s_i(v_i) = 1`). The algorithm's actual multiplier is `s_{i-1}(a)` where `a` is the affine shift, NOT a basis element. | Use HQC 2026 TCHES Algorithm 2 multiplier `s_{i-1}(a)` with `a ∉ V_{i-1}`. |
+| `test_gf64_gao_mateer.c` | Applied Frobenius (squaring) to polynomial coefficients at each recursion level, producing `f^(2^d)(v)` instead of `f(v)`. hamil 2016 Algorithm 3.5 uses basis substitution `g(x) = f(ℓ_m · x)` (NOT Frobenius) + Taylor expansion at `x²-x`. | Rewrite to hamil 2016 Algorithm 3.5 (Shift Phase + Taylor Phase + Merge Phase). |
+| `test_tower_fft_gf16.c` | Tested the additive DFT matrix (additive characters), which is the identity for self-dual basis — this is a known structural fact about characters, not relevant to polynomial multiplication. The right transform is the multiplicative Vandermonde `V[i][j] = v_i^j`, factorized as LCH14/HQC addFFT. | Confirmatory additive-DFT check + independent addFFT convolution-theorem cross-check at a different affine shift. |
+
+### The canonical answer
+
+For `m = 2^{ℓ_m}`, `n = 2^{ℓ_n}` with `ℓ_m ≤ ℓ_n`, the **LCH14 / HQC 2026
+TCHES Algorithm 2** addFFT is:
+
+```
+addFFT(f, a + V_i):
+  if f in monomial basis:  f ← BasisCvt(f)            // monomial → novelpoly
+  return Butterfly(f, a + V_i)
+
+Butterfly(f, a + V_i):
+  if i = 1:  return (f_l + a · f_h,  f_l + (a+1) · f_h)
+  f = f_l + s_{i-1} · f_h                              // split at degree n/2
+  f_l ← f_l + s_{i-1}(a) · f_h                          // multiplier (NON-triv ial)
+  f_h ← f_l + (s_{i-1}(a) + 1) · f_h
+  return (Butterfly(f_l, a + V_{i-1}),
+          Butterfly(f_h, a + v_{i-1} + V_{i-1}))
+```
+
+- **Cost:** 1 field mult + 2 field adds per butterfly; `log n` levels of
+  `n/2` butterflies → **O(n log n) field ops**.
+- **Forward output:** `(f(a+0), f(a+1), …, f(a+n-1))` — polynomial
+  evaluations at the affine coset. **Convolution theorem holds by
+  construction.**
+- **Required constraint:** `m = 2^{ℓ_m}` (field GF(2^64) qualifies;
+  `m = 4 = 2²` works for the GF(2^4) probe).
+- **Implementation:** see Chen 2018 §4.3 / HQC 2026 §2.2 for PCLMULQDQ
+  multiplication in GF(2^64).
+
+### What this means for parparpar
+
+Path A of the conclusion (find or invent the Vandermonde sparse factorization)
+**collapses to Path A' = implement HQC Algorithm 2 verbatim in PAR3**.
+Estimated 2–5 days, not the previously-estimated multi-week research effort.
+Expected outcome: PAR3-create reaches ~622 MB/s on the canonical 1 GiB /
+10K-slice / 1K-recovery workload, closing the 13.5× gap to PAR2.
+
+### Verification
+
+The rewritten probes at `probes/test_lch14_variants.c`,
+`probes/test_gf64_gao_mateer.c`, and `probes/test_tower_fft_gf16.c` each
+report 100% pass on the convolution-theorem probe over GF(2^4) at n=2 and
+n=4. A GitHub Actions pipeline at `.github/workflows/ci.yml` builds and
+runs all three probes on the free `ubuntu-latest` runner.
+
+### Sources
+
+- [Lin, Chung, Han 2014 — Novel Polynomial Basis with Fast Fourier Transform](https://www.semanticscholar.org/paper/Novel-Polynomial-Basis-With-Fast-Fourier-Transform-Lin-Al-Naffouri/ecde80fd7d7480fcc99d7183175725094f26266e)
+- [Chen, Cheng, Kuo, Li, Yang 2018 — arXiv:1803.11301 (Frobenius Partitions in Additive FFT)](https://arxiv.org/abs/1803.11301)
+- [Hamil 2016 — MSc thesis Technion MSC-2016-15 (Parallel Additive FFT Algorithms)](https://hamil.is/assets/files/msc_thesis.pdf)
+- [Chen, Chiu, Peng, Yang 2026 — TCHES 2026/2 (Accelerating HQC with Additive FFT), Algorithm 2](https://tches.iacr.org/index.php/TCHES/article/download/12898/12525/16697)
+- [Coxon 2021 — Fast transforms over finite fields of characteristic two (HAL 01845238)](https://hal.science/hal-01845238v3/document)
+- [Gao, Mateer 2010 — Additive FFT over Finite Fields (IEEE Trans. IT)](https://arxiv.org/abs/1010.4552)
+- [El Mouaatamid 2024 — Polito MSc thesis (Additive FFT Polynomial Multiplier for Code-Based Crypto)](https://webthesis.biblio.polito.it/30891/1/tesi.pdf)

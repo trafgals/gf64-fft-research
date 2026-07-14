@@ -1,0 +1,76 @@
+name: probes
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    name: build & run additive-FFT probes (ubuntu-latest, gcc)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install gcc
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends gcc libc6-dev
+
+      - name: Print environment
+        run: |
+          echo "gcc:    $(gcc --version | head -1)"
+          echo "runner: ${{ runner.os }}"
+
+      - name: Build all probes
+        working-directory: probes
+        run: |
+          set -euo pipefail
+          for p in test_lch14_variants test_gf64_gao_mateer test_tower_fft_gf16; do
+            echo "=== building $p ==="
+            gcc -O2 -Wall -Wextra -Wpedantic -std=c99 "$p.c" -o "$p"
+          done
+
+      - name: Run LCH14/HQC addFFT probe
+        working-directory: probes
+        run: |
+          set -euo pipefail
+          out=$(./test_lch14_variants)
+          echo "$out"
+          # Forward-output match must be 100% at n=2 and n=4.
+          echo "$out" | grep -E "n=2: 100% match rate = 100.00%" >/dev/null
+          echo "$out" | grep -E "n=4: 100% match rate = 100.00%" >/dev/null
+          # Convolution-theorem pass rate must be 100% at n=2 and n=4.
+          echo "$out" | grep -E "n=2 .57600 cases.: pass rate = 100.00%" >/dev/null
+          echo "$out" | grep -E "n=4 .57600 cases.: pass rate = 100.00%" >/dev/null
+          echo "OK: test_lch14_variants — 100% pass on both probes."
+
+      - name: Run Gao-Mateer (hamil affine) probe
+        working-directory: probes
+        run: |
+          set -euo pipefail
+          out=$(./test_gf64_gao_mateer)
+          echo "$out"
+          # Forward-output match rate at n=4 must be 100%.
+          echo "$out" | grep -E "n=4 .16\^4 = 65536 cases.: match rate = 100.00%" >/dev/null
+          # Convolution-theorem pass rate at n=4 must be 100%.
+          echo "$out" | grep -E "n=4 .57600 cases.: pass rate = 100.00%" >/dev/null
+          echo "OK: test_gf64_gao_mateer — 100% pass."
+
+      - name: Run Tower addFFT verification probe
+        working-directory: probes
+        run: |
+          set -euo pipefail
+          out=$(./test_tower_fft_gf16)
+          echo "$out"
+          # Independent cross-check at the third probe's affine shift.
+          echo "$out" | grep -E "pass rate over 57600 cases: 100.00%" >/dev/null
+          echo "OK: test_tower_fft_gf16 — 100% pass."
+
+      - name: Summary
+        run: echo "All additive-FFT probes at GF(2^4) pass the convolution-theorem probe at 100%."
