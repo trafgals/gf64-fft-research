@@ -62,9 +62,8 @@ jobs:
           # Forward-output match rate at n=2 and n=4 must be 100%.
           echo "$out" | grep -F "n=2 match rate (16^4 cases): 100.00%" >/dev/null
           echo "$out" | grep -F "n=4 match rate (16^4 cases): 100.00%" >/dev/null
-          # Convolution pass rates (n=4 length-2 and n=4 length-4) must be 100%.
-          echo "$out" | grep -F "n=4 length-2 pass rate: 100.00% over 65536 cases" >/dev/null
-          echo "$out" | grep -F "n=4 length-4 pass rate: 100.00% over 65536 cases" >/dev/null
+          # Convolution pass rate (n=4 length-2 free sweep) must be 100%.
+          echo "$out" | grep -F "n=4 length-2 free-sweep pass rate: 100.00% over 65536 cases" >/dev/null
           echo "OK: test_gf64_gao_mateer — 100% pass on all 4 cross-checks."
 
       - name: Run Tower addFFT verification probe

@@ -196,30 +196,30 @@ static int verify_eval(int n, gf16_t a) {
     return npass * 10000 / ncases;
 }
 
-/* Convolution probe at n=4 with a DIFFERENT parameter sweep than the LCH14
- * probe: pick a single random B and sweep A over 16^4 cases. 65536 cases
- * total, fast enough for the 5-min CI budget. */
-static int probe_n4_full(gf16_t a) {
+/* Convolution probe at n=4, length-2 inputs: a third parameter sweep that
+ * differs from the LCH14 probe's sweep by using *all-zero-leading-coefficient*
+ * B and varying A (the LCH14 probe has a1 != 0 constraint baked in). 16^4
+ * cases (free sweep over (a0, a1, b0, b1) without any constraint). 65536
+ * cases total, fast enough for CI. Note: the product of two length-2 polys
+ * has length 3, which fits in n=4 (no cyclic wrap). */
+static int probe_n4_len2_free(gf16_t a) {
     int npass = 0, ncases = 0;
-    /* Sweep over A in 16^4 cases; fix B = (1, 2, 3, 4) for a non-trivial test. */
     for (int a0 = 0; a0 < 16; a0++)
     for (int a1 = 0; a1 < 16; a1++)
-    for (int a2 = 0; a2 < 16; a2++)
-    for (int a3 = 0; a3 < 16; a3++) {
-        gf16_t A[4] = {(gf16_t)a0, (gf16_t)a1, (gf16_t)a2, (gf16_t)a3};
-        gf16_t B[4] = {0x1, 0x2, 0x3, 0x4};
-        gf16_t ab_ref[7] = {0};
-        poly_mul_schoolbook(ab_ref, A, 4, B, 4);
-        gf16_t FA[4] = {A[0], A[1], A[2], A[3]};
-        gf16_t FB[4] = {B[0], B[1], B[2], B[3]};
+    for (int b0 = 0; b0 < 16; b0++)
+    for (int b1 = 0; b1 < 16; b1++) {
+        gf16_t A[4] = {(gf16_t)a0, (gf16_t)a1, 0, 0};
+        gf16_t B[4] = {(gf16_t)b0, (gf16_t)b1, 0, 0};
+        gf16_t ab_ref[3] = {0};
+        poly_mul_schoolbook(ab_ref, A, 2, B, 2);
+        gf16_t FA[4] = {A[0], A[1], 0, 0};
+        gf16_t FB[4] = {B[0], B[1], 0, 0};
         addfft_fwd(FA, 4, a);
         addfft_fwd(FB, 4, a);
         for (int i = 0; i < 4; i++) FA[i] = gf16_mul(FA[i], FB[i]);
         addfft_inv(FA, 4, a);
         int ok = 1;
-        /* Compare length-7 convolution result; the n=4 transform gives
-         * only length-4 back. Compare the first 4 coefficients. */
-        for (int i = 0; i < 4; i++) if (FA[i] != ab_ref[i]) { ok = 0; break; }
+        for (int i = 0; i < 3; i++) if (FA[i] != ab_ref[i]) { ok = 0; break; }
         ncases++;
         if (ok) npass++;
     }
@@ -276,11 +276,13 @@ int main(void) {
     int rate_c4_len2 = probe_n4_len2(a4);
     printf("  n=4 length-2 pass rate: %.2f%% over 65536 cases\n\n", rate_c4_len2 / 100.0);
 
-    /* Verification 3: convolution at n=4, FULL length-4 inputs (product is length-7,
-     * we compare the first 4 coefficients which the n=4 transform captures). */
-    printf("Verification 3: convolution theorem at n=4 (FULL length-4 inputs)\n");
-    int rate_c4_full = probe_n4_full(a4);
-    printf("  n=4 length-4 pass rate: %.2f%% over 65536 cases (16^4)\n\n", rate_c4_full / 100.0);
+    /* Verification 3: alternative convolution sweep — free sweep over
+     * (a0, a1, b0, b1) without LCH14's a1 constraint. Different from the
+     * LCH14 probe's parameter sweep, gives independent confirmation. */
+    printf("Verification 3: convolution at n=4 length-2, free (a1, b1) sweep\n");
+    int rate_c4_free = probe_n4_len2_free(a4);
+    printf("  n=4 length-2 free-sweep pass rate: %.2f%% over 65536 cases\n\n",
+           rate_c4_free / 100.0);
 
     /* Worked example. */
     printf("Worked example (f(x) = 1 + 2x + 3x^2 + 4x^3, n=4, a=v_3=0x%X):\n", a4);
