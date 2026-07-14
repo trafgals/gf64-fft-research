@@ -45,10 +45,13 @@ jobs:
           # Forward-output match must be 100% at n=2 and n=4.
           echo "$out" | grep -E "n=2: 100% match rate = 100.00%" >/dev/null
           echo "$out" | grep -E "n=4: 100% match rate = 100.00%" >/dev/null
-          # Convolution-theorem pass rate must be 100% at n=2 and n=4.
-          echo "$out" | grep -E "n=2 .57600 cases.: pass rate = 100.00%" >/dev/null
+          # Convolution-theorem pass rate must be 100% at n=4.
+          # (n=2 is mathematically degenerate for non-constant polys: the
+          # product of two degree-1 polys has degree 2 and doesn't fit in
+          # an n=2 FFT's 2 output slots. The n=2 case is covered by the
+          # forward-output check above.)
           echo "$out" | grep -E "n=4 .57600 cases.: pass rate = 100.00%" >/dev/null
-          echo "OK: test_lch14_variants — 100% pass on both probes."
+          echo "OK: test_lch14_variants — 100% pass on forward-output and convolution probes."
 
       - name: Run Gao-Mateer (hamil affine) probe
         working-directory: probes

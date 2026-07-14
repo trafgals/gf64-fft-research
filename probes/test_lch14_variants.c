@@ -309,10 +309,17 @@ int main(void) {
     int rate_e4 = verify_eval(4, a4);
     printf("  n=4: 100%% match rate = %.2f%%\n\n", rate_e4 / 100.0);
 
-    /* (2) Convolution theorem: round-trip via FFT recovers the polynomial mul. */
+    /* (2) Convolution theorem: round-trip via FFT recovers the polynomial mul.
+     *
+     * Note: at n=2 we cannot test the convolution theorem for general
+     * degree-1 polynomials because the product has degree 2 (length 3) but
+     * an n=2 FFT only has 2 slots. Either both inputs must be constants
+     * (deg 0, degenerate) OR the FFT must be padded to n=4. We test at
+     * n=4 only; the n=2 case is covered by Verification 1 (forward output
+     * equals polynomial evaluations). */
     printf("Verification 2: convolution theorem (fwd + pointwise + inv = mul)\n");
-    int rate_c2 = probe(2, a2);
-    printf("  n=2 (57600 cases): pass rate = %.2f%%\n", rate_c2 / 100.0);
+    printf("  (n=2 case is mathematically degenerate for non-constant polys;\n");
+    printf("   covered at n=2 by Verification 1, and here at n=4.)\n");
     int rate_c4 = probe(4, a4);
     printf("  n=4 (57600 cases): pass rate = %.2f%%\n\n", rate_c4 / 100.0);
 
