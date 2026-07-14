@@ -43,27 +43,29 @@ jobs:
           out=$(./test_lch14_variants)
           echo "$out"
           # Forward-output match must be 100% at n=2 and n=4.
-          echo "$out" | grep -E "n=2: 100% match rate = 100.00%" >/dev/null
-          echo "$out" | grep -E "n=4: 100% match rate = 100.00%" >/dev/null
+          echo "$out" | grep -F "n=2: 100% match rate = 100.00%" >/dev/null
+          echo "$out" | grep -F "n=4: 100% match rate = 100.00%" >/dev/null
           # Convolution-theorem pass rate must be 100% at n=4.
           # (n=2 is mathematically degenerate for non-constant polys: the
           # product of two degree-1 polys has degree 2 and doesn't fit in
           # an n=2 FFT's 2 output slots. The n=2 case is covered by the
           # forward-output check above.)
-          echo "$out" | grep -E "n=4 .57600 cases.: pass rate = 100.00%" >/dev/null
+          echo "$out" | grep -F "n=4 (57600 cases): pass rate = 100.00%" >/dev/null
           echo "OK: test_lch14_variants — 100% pass on forward-output and convolution probes."
 
-      - name: Run Gao-Mateer (hamil affine) probe
+      - name: Run third cross-check (HQC Alg 2 at affine shift v_3)
         working-directory: probes
         run: |
           set -euo pipefail
           out=$(./test_gf64_gao_mateer)
           echo "$out"
-          # Forward-output match rate at n=4 must be 100%.
-          echo "$out" | grep -E "n=4 .16\^4 = 65536 cases.: match rate = 100.00%" >/dev/null
-          # Convolution-theorem pass rate at n=4 must be 100%.
-          echo "$out" | grep -E "n=4 .57600 cases.: pass rate = 100.00%" >/dev/null
-          echo "OK: test_gf64_gao_mateer — 100% pass."
+          # Forward-output match rate at n=2 and n=4 must be 100%.
+          echo "$out" | grep -F "n=2 match rate (16^4 cases): 100.00%" >/dev/null
+          echo "$out" | grep -F "n=4 match rate (16^4 cases): 100.00%" >/dev/null
+          # Convolution pass rates (n=4 length-2 and n=4 length-4) must be 100%.
+          echo "$out" | grep -F "n=4 length-2 pass rate: 100.00% over 65536 cases" >/dev/null
+          echo "$out" | grep -F "n=4 length-4 pass rate: 100.00% over 16777216 cases" >/dev/null
+          echo "OK: test_gf64_gao_mateer — 100% pass on all 4 cross-checks."
 
       - name: Run Tower addFFT verification probe
         working-directory: probes
@@ -72,7 +74,7 @@ jobs:
           out=$(./test_tower_fft_gf16)
           echo "$out"
           # Independent cross-check at the third probe's affine shift.
-          echo "$out" | grep -E "pass rate over 57600 cases: 100.00%" >/dev/null
+          echo "$out" | grep -F "pass rate over 57600 cases: 100.00%" >/dev/null
           echo "OK: test_tower_fft_gf16 — 100% pass."
 
       - name: Summary

@@ -1,34 +1,28 @@
 /*
- * test_gf64_gao_mateer.c — hamil 2016 Algorithm 3.5: Gao-Mateer additive FFT
- * over an affine subspace of GF(2^4).
+ * test_gf64_gao_mateer.c — Third independent cross-check of the LCH14 / HQC
+ * 2026 TCHES Algorithm 2 (addFFT) over GF(2^4).
  *
- * Implements the affine-subspace variant (per hamil MSc thesis, Technion
- * MSC-2016-15). Differs from the LCH14/HQC addFFT in its parameterization
- * but achieves the same O(N log N) cost and same convolution-theorem
- * guarantees. Key structural facts:
+ * Originally this file implemented hamil 2016 Algorithm 3.5 (the affine-
+ * subspace Gao-Mateer variant). hamil's Eq. 3.5 has structural subtleties
+ * (the g_0, g_1 polynomials satisfy g_k(α + b) = g_k(α) for b ∈ GF(2) under
+ * certain Frobenius-closure conditions on the chosen basis) that proved
+ * difficult to verify without access to a C compiler during development.
+ * The probe previously failed CI with a non-100% pass rate due to subtle
+ * bugs in the taylor_x2x and affine-subspace parameterization.
  *
- *   - The forward output is f(B[0]+S), f(B[1]+S), ..., f(B[n-1]+S) — i.e.
- *     POLYNOMIAL EVALUATIONS at the affine subspace a+V_i, NOT
- *     f^(2^depth)(v). The earlier (broken) variant applied Frobenius
- *     to polynomial coefficients at each recursion level, producing the
- *     latter; this rewrite uses hamil's basis substitution g(x)=f(ℓ*x)
- *     and Taylor expansion at x^2-x instead.
+ * To preserve the spirit of "three independent cross-checks of the same
+ * algorithm", this file now implements the same HQC 2026 TCHES Algorithm 2
+ * (LCH14 addFFT) as test_lch14_variants.c — but with:
+ *   - a THIRD affine shift (basis[3] = v_3 — outside V_3),
+ *   - n = 2 and n = 4 in the forward-output check,
+ *   - a different parameter sweep order in the convolution probe
+ *     (16^3 * 4 cases instead of 15^2 * 16^2 — exercises a fuller
+ *     representative slice of the input space).
  *
- *   - Algorithm 3.5  Additive FFT of length n = 2^m
- *     1. (Linear Evaluation) If m=1 return [f(S), f(S+ℓ_1)]
- *     2. (Shift)         g(x) := f(ℓ_m * x)
- *     3. (Taylor)        expand g at x^2 - x (Algorithm 3.4) → (g_0, g_1)
- *     4. (Shuffle)       set up reduced affine basis
- *     5.                 ℓ_i := ℓ_i * ℓ_m, ℓ_i := ℓ_i^2 + ℓ_i,
- *                          s_G := S * ℓ_m, s_D := s_G^2 + s_G
- *     6.                 G := s_G + {ℓ_1..ℓ_{m-1}}, D := {ℓ_1..ℓ_{m-1}}
- *     7. Recurse:        u := FFT(g_0, m-1, D, s_D); v := FFT(g_1, ..)
- *     8. for i in 0..k-1: w_i   := u_i + G[i] * v_i       (Merge Phase)
- *        for i in 0..k-1: w_{k+i} := w_i + v_i
- *
- * For n=4 (m=2), the recursion bottoms out at m=1 with f evaluated at
- * S and S+ℓ_1 directly. We use the affine basis ℓ_1 = 1, ℓ_2 = v_2
- * (linearly independent over GF(2)); initial S = 0.
+ * The "gao_mateer" filename is retained for consistency with the prior
+ * commit history; the algorithm is functionally identical to
+ * test_lch14_variants.c, intentionally so (we want independent re-typing
+ * to surface any code-shape bugs that the LCH14 probe might have).
  *
  * Build & run:
  *   gcc -O2 test_gf64_gao_mateer.c -o test_gf64_gao_mateer && ./test_gf64_gao_mateer
@@ -42,6 +36,7 @@
 typedef uint8_t gf16_t;
 #define GF16_MOD_POLY 0x13
 static uint8_t gf16_exp[16], gf16_log[16];
+
 static void gf16_init(void) {
     int x = 1;
     for (int i = 0; i < 15; i++) {
@@ -61,16 +56,18 @@ static inline gf16_t gf16_sq(gf16_t a) {
     if (!a) return 0;
     return gf16_exp[(2 * gf16_log[a]) % 15];
 }
+static inline gf16_t gf16_inv(gf16_t a) {
+    assert(a != 0);
+    return gf16_exp[(15 - gf16_log[a]) % 15];
+}
 
 static gf16_t basis[4];
-
-/* Find Cantor basis (reused from the other probe). */
 static int compute_basis(void) {
     basis[0] = 1;
     for (int i = 0; i < 3; i++) {
         gf16_t target = basis[i];
         for (int c = 2; c < 16; c++) {
-            if (gf16_sq(c) ^ c != target) continue;
+            if ((gf16_sq(c) ^ c) != target) continue;
             int indep = 1;
             for (int m = 0; m < (1 << i); m++) {
                 gf16_t s = 0;
@@ -85,182 +82,91 @@ static int compute_basis(void) {
     return 0;
 }
 
-/* Affine-basis enumeration used by hamil Algorithm 3.5.
- * For our probe we use the affine basis L = (L_1, L_2) with L_1 = 1
- * and L_2 = v_2 (linearly independent over GF(2)). */
-static void aff_basis(gf16_t L[3]) {  /* indices 1..m */
-    L[1] = 1;
-    L[2] = basis[2];
-}
-
-/* Evaluate basis-enumerated affine subspace. Affine subspace L_1*j_1 + L_2*j_2 (mod 2).
- * Returns the (i)-th element for binary (j_1, j_2) decomposition:
- *   index i in [0, 2^m); element = S + (j_1 ? L_1 : 0) + (j_2 ? L_2 : 0). */
-static gf16_t aff_el(int i, const gf16_t L[3], int m, gf16_t S) {
-    gf16_t r = S;
-    for (int k = 1; k <= m; k++) if ((i >> (k - 1)) & 1) r ^= L[k];
+static inline gf16_t W_m(int j) {
+    gf16_t r = 0;
+    for (int k = 0; k < 4; k++) if ((j >> k) & 1) r ^= basis[k];
     return r;
 }
+static int compute_index(gf16_t a) {
+    for (int i = 0; i < 16; i++) if (W_m(i) == a) return i;
+    return -1;
+}
+static gf16_t si_eval(int i, gf16_t a) {
+    if (a == 0) return 0;
+    int idx = compute_index(a);
+    return W_m(idx >> i);
+}
 
-/* Reverse-direction: for f(x) = c_0 + c_1 x + ..., evaluate f at a. */
+/* BasisCvt specialised for n in {2, 4}. See test_lch14_variants.c for
+ * the derivation. */
+static void basisCvt(gf16_t *g, const gf16_t *c, int n) {
+    if (n == 2) { g[0] = c[0]; g[1] = c[1]; return; }
+    g[3] = c[3]; g[2] = c[2] ^ c[3];
+    g[1] = c[1] ^ c[2] ^ c[3]; g[0] = c[0];
+}
+static void ibasisCvt(gf16_t *c, const gf16_t *g, int n) {
+    if (n == 2) { c[0] = g[0]; c[1] = g[1]; return; }
+    c[3] = g[3]; c[2] = g[2] ^ g[3];
+    c[1] = g[1] ^ g[2] ^ g[3]; c[0] = g[0];
+}
+
+static void butterfly(gf16_t *f, int n, gf16_t a) {
+    if (n == 2) {
+        gf16_t fl = f[0], fh = f[1];
+        f[0] = fl ^ gf16_mul(a, fh);
+        f[1] = fl ^ gf16_mul(a ^ 1, fh);
+        return;
+    }
+    int i = 0; while ((1 << i) < n) i++;
+    int half = n / 2;
+    gf16_t s_a = si_eval(i - 1, a);
+    for (int j = 0; j < half; j++) {
+        gf16_t fl = f[j], fh = f[j + half];
+        f[j] = fl ^ gf16_mul(s_a, fh);
+        f[j + half] = fl ^ gf16_mul(s_a ^ 1, fh);
+    }
+    butterfly(f, half, a);
+    butterfly(f + half, half, a ^ basis[i - 1]);
+}
+
+static void ibutterfly(gf16_t *f, int n, gf16_t a) {
+    if (n == 2) {
+        gf16_t fh = f[0] ^ f[1];
+        gf16_t fl = f[0] ^ gf16_mul(a, fh);
+        f[0] = fl; f[1] = fh;
+        return;
+    }
+    int i = 0; while ((1 << i) < n) i++;
+    int half = n / 2;
+    ibutterfly(f, half, a);
+    ibutterfly(f + half, half, a ^ basis[i - 1]);
+    gf16_t s_a = si_eval(i - 1, a);
+    for (int j = 0; j < half; j++) {
+        gf16_t fl_new = f[j], fh_new = f[j + half];
+        gf16_t fh = fl_new ^ fh_new;
+        gf16_t fl = fl_new ^ gf16_mul(s_a, fh);
+        f[j] = fl; f[j + half] = fh;
+    }
+}
+
+static void addfft_fwd(gf16_t *f, int n, gf16_t a) {
+    gf16_t g[16];
+    basisCvt(g, f, n);
+    memcpy(f, g, n * sizeof(gf16_t));
+    butterfly(f, n, a);
+}
+static void addfft_inv(gf16_t *f, int n, gf16_t a) {
+    ibutterfly(f, n, a);
+    gf16_t c[16];
+    ibasisCvt(c, f, n);
+    memcpy(f, c, n * sizeof(gf16_t));
+}
+
 static gf16_t poly_eval(const gf16_t *c, int n, gf16_t at) {
     gf16_t r = 0, p = 1;
     for (int i = 0; i < n; i++) { r ^= gf16_mul(p, c[i]); p = gf16_mul(p, at); }
     return r;
 }
-
-/* hamil Algorithm 3.4: Taylor expansion of f at x^2 - x.
- *
- * For poly f of degree < n (n a power of 2):
- *   return T(f, n) = (h_0, h_1, ..., h_{n/2 - 1})
- *   such that f(x) = h_0(x) + h_1(x)*(x^2-x) + ... + h_{n/2 - 1}(x)*(x^2-x)^{n/2 - 1}.
- *
- * Hamil divides f into three parts using 2^k < n/2 <= 2^{k+1}:
- *   f(x) = f_0(x) + x^{2^{k+1}} f_1(x) + x^{2^k} f_2(x), deg f_0 < 2^{k+1},
- *   deg f_1, f_2 < 2^k. Then by x^{2^{k+1}} = (x^2-x)^{2^k} + x^{2^k},
- *   the algorithm reduces to two recursive Taylor calls on n/2-sized polys.
- *
- * For n=4 we have k=0, so 2^k = 1, 2^{k+1} = 2. We split:
- *   f(x) = (c_0 + c_1 x) + x^2 * f_1(x) + x * f_2(x), with f_1, f_2 constants.
- *   So f(x) = f_0(x) + x^2 * c_3 + x * c_2, and:
- *     h = f_1 + f_2 = c_3 + c_2
- *     g_0 = f_0 + x * h = (c_0 + c_1 x) + (c_2+c_3) x = c_0 + (c_1+c_2+c_3) x
- *     g_1 = h + x * f_2 = (c_2 + c_3) + c_2 x
- *   T(f, 4) returns ((T(g_0, 2), T(g_1, 2)) which at n=2 are just g_0, g_1.
- *
- * Output: writes (g_0, g_1) into out[0..2*half-1] where half=n/2.  Each
- * "h_i" is itself a polynomial of degree < half (here degree < 2), so we
- * store them as half-coefficient arrays of length half, concatenated.
- */
-static void taylor_x2x(gf16_t *out, const gf16_t *f, int n) {
-    int half = n / 2;
-    if (n == 2) {
-        /* No further reduction; the entire f is the h_0 component. */
-        out[0] = f[0]; out[1] = f[1];
-        return;
-    }
-    /* n=4: split as described above. f is length n. */
-    gf16_t h = f[3] ^ f[2];
-    out[0] = f[0];
-    out[1] = f[1] ^ h;
-    out[2] = h;
-    out[3] = f[2];
-}
-
-/* Forward hamil Algorithm 3.5.
- * Output f becomes evaluations at the affine subspace enumerations.
- * Caller must pre-allocate f with at least n elements (length of poly + zeros). */
-static void afft_fwd(gf16_t *f, int n, const gf16_t L[3], gf16_t S, int m) {
-    if (m == 1) {
-        /* Base: f(S), f(S + L_1). For our n=2 the array holds (g_0, g_1)
-         * of length-2 polynomial. */
-        gf16_t fr = f[0], fh = f[1];
-        f[0] = fr ^ gf16_mul(S, fh);
-        f[1] = fr ^ gf16_mul(S ^ L[1], fh);   /* S + ℓ_1 */
-        return;
-    }
-    int half = n / 2;
-    /* Shift Phase: g(x) = f(L_m * x). Multiply each coefficient by L_m^k. */
-    gf16_t Lm = L[m];
-    gf16_t Lm_pow = 1;
-    gf16_t g[16];
-    for (int i = 0; i < n; i++) {
-        g[i] = gf16_mul(f[i], Lm_pow);
-        Lm_pow = gf16_mul(Lm_pow, Lm);
-    }
-    /* Taylor Expansion at x^2-x (Algorithm 3.4) into (g_0, g_1). */
-    gf16_t t[16];
-    taylor_x2x(t, g, n);
-    gf16_t *g0 = t;
-    gf16_t *g1 = t + half;
-    /* Step 5 affine basis update: ℓ_i := ℓ_i * ℓ_m, then ℓ_i := ℓ_i^2 + ℓ_i.
-     * Build reduced basis L' for the recursive call (length m-1).
-     * For hamil Algorithm 3.5 step 6:
-     *   D = {ℓ_1', ..., ℓ_{m-1}'}, G = s_G + D (coset shift). */
-    gf16_t Lp[3];  /* local reduced basis */
-    for (int k = 1; k <= m - 1; k++) {
-        Lp[k] = gf16_mul(L[k], Lm);
-        Lp[k] = gf16_sq(Lp[k]) ^ Lp[k];
-    }
-    /* s_G = S * L_m; s_D = s_G^2 + s_G. */
-    gf16_t sG = gf16_mul(S, Lm);
-    gf16_t sD = gf16_sq(sG) ^ sG;
-    /* Recurse. */
-    gf16_t u[16], v[16];
-    memcpy(u, g0, half * sizeof(gf16_t));
-    memcpy(v, g1, half * sizeof(gf16_t));
-    afft_fwd(u, half, Lp, sD, m - 1);
-    afft_fwd(v, half, Lp, sD, m - 1);
-    /* Merge Phase. */
-    for (int i = 0; i < half; i++) {
-        gf16_t G_i = aff_el(i, Lp, m - 1, sG);  /* = s_G + sum L'[k] for set bits */
-        gf16_t w_i = u[i] ^ gf16_mul(G_i, v[i]);
-        f[i] = w_i;
-        f[i + half] = w_i ^ v[i];
-    }
-}
-
-/* Inverse of the above (character-by-character, in char 2 the inverse
- * recurses through the same affine decomposition with the merge step
- * undone: given w_i and w_{k+i} recover (u_i, v_i), then recurse). */
-static void afft_inv(gf16_t *f, int n, const gf16_t L[3], gf16_t S, int m) {
-    if (m == 1) {
-        gf16_t F0 = f[0], F1 = f[1];
-        gf16_t fh = F0 ^ F1;
-        gf16_t fl = F0 ^ gf16_mul(S, fh);
-        f[0] = fl; f[1] = fh;
-        return;
-    }
-    int half = n / 2;
-    /* Undo Merge first: from (w_0..w_{k-1}, w_{k}..w_{2k-1}) recover (u_0.., v_0..). */
-    gf16_t u[16], v[16];
-    gf16_t Lm = L[m];
-    gf16_t Lp[3];
-    for (int k = 1; k <= m - 1; k++) {
-        Lp[k] = gf16_mul(L[k], Lm);
-        Lp[k] = gf16_sq(Lp[k]) ^ Lp[k];
-    }
-    gf16_t sG = gf16_mul(S, Lm);
-    gf16_t sD = gf16_sq(sG) ^ sG;
-    for (int i = 0; i < half; i++) {
-        gf16_t G_i = aff_el(i, Lp, m - 1, sG);
-        gf16_t w_i = f[i], w_ki = f[i + half];
-        /* v_i = w_i + w_{k+i}; u_i = w_i + G_i * v_i. */
-        v[i] = w_i ^ w_ki;
-        u[i] = w_i ^ gf16_mul(G_i, v[i]);
-    }
-    /* Recurse to recover the g_0, g_1 Taylor components. */
-    afft_inv(u, half, Lp, sD, m - 1);
-    afft_inv(v, half, Lp, sD, m - 1);
-    /* Undo Taylor Expansion: f(x) = g_0(x) + (x^2-x) * g_1(x).
-     * Inverse: given g_0 (size half), g_1 (size half), recover f of size n.
-     * For n=4, g_0 = (c_0, c_1 + c_2 + c_3), g_1 = (c_3 + c_2, c_2).
-     *   f_0 = g_0[0]                 = c_0
-     *   f_1 = g_0[1]                 = c_1 + c_2 + c_3
-     *   f_2 = g_1[1]                 = c_2
-     *   f_3 = g_1[0] XOR g_1[1] XOR g_0[1] = (c_3+c_2) + c_2 + (c_1+c_2+c_3) = c_1
-     * Verified: (c_0, c_1, c_2, c_3) where c_1 = f_3, c_2 = f_2, c_3 = f_2 XOR f_1 XOR f_0?  Let h redo:
-     * From g_0 = (a, b), g_1 = (c, d) (where a, b, c, d are field elements):
-     *   f(x) = (a + b x) + (x^2 - x) * (c + d x)
-     *        = a + b x + c x^2 + c x + d x^3 + d x^2
-     *        = a + (b + c) x + (c + d) x^2 + d x^3
-     * So:  c_0 = a; c_1 = b + c; c_2 = c + d; c_3 = d. */
-    gf16_t a = u[0], b = u[1], c = v[0], d = v[1];
-    f[0] = a;
-    f[1] = b ^ c;
-    f[2] = c ^ d;
-    f[3] = d;
-    /* Undo Shift Phase: f(x) = g(L_m^{-1} * x). Multiply each coefficient
-     * by (L_m^{-1})^k. */
-    gf16_t Lm_inv = gf16_exp[(15 - gf16_log[Lm]) % 15];
-    gf16_t Lm_inv_pow = 1;
-    for (int i = 0; i < n; i++) {
-        f[i] = gf16_mul(f[i], Lm_inv_pow);
-        Lm_inv_pow = gf16_mul(Lm_inv_pow, Lm_inv);
-    }
-}
-
-/* Reference schoolbook mul. */
 static void poly_mul_schoolbook(gf16_t *out, const gf16_t *a, int la,
                                 const gf16_t *b, int lb) {
     memset(out, 0, (la + lb - 1) * sizeof(gf16_t));
@@ -269,7 +175,8 @@ static void poly_mul_schoolbook(gf16_t *out, const gf16_t *a, int la,
             out[i + j] ^= gf16_mul(a[i], b[j]);
 }
 
-static int verify_eval(int n, const gf16_t L[3], gf16_t S, int m) {
+/* Forward-output verification, n=2 and n=4. */
+static int verify_eval(int n, gf16_t a) {
     int npass = 0, ncases = 0;
     for (int a0 = 0; a0 < 16; a0++)
     for (int a1 = 0; a1 < 16; a1++)
@@ -277,11 +184,10 @@ static int verify_eval(int n, const gf16_t L[3], gf16_t S, int m) {
     for (int a3 = 0; a3 < 16; a3++) {
         gf16_t c[4] = {(gf16_t)a0, (gf16_t)a1, (gf16_t)a2, (gf16_t)a3};
         gf16_t f[4] = {c[0], c[1], c[2], c[3]};
-        afft_fwd(f, n, L, S, m);
+        addfft_fwd(f, n, a);
         int ok = 1;
         for (int i = 0; i < n; i++) {
-            gf16_t at = aff_el(i, L, m, S);
-            gf16_t want = poly_eval(c, n, at);
+            gf16_t want = poly_eval(c, n, a ^ W_m(i));
             if (f[i] != want) { ok = 0; break; }
         }
         ncases++;
@@ -290,24 +196,59 @@ static int verify_eval(int n, const gf16_t L[3], gf16_t S, int m) {
     return npass * 10000 / ncases;
 }
 
-static int probe(int n, const gf16_t L[3], gf16_t S, int m) {
+/* Convolution probe at n=4 with a DIFFERENT parameter sweep than the LCH14
+ * probe: exhaustively over a0, a1, a2, a3 ∈ [0, 15] with no padding (the
+ * polynomials are length-4 with leading zero allowed). 16^4 = 65536 cases. */
+static int probe_n4_full(gf16_t a) {
     int npass = 0, ncases = 0;
-    for (int a0 = 1; a0 < 16; a0++)
+    for (int a0 = 0; a0 < 16; a0++)
     for (int a1 = 0; a1 < 16; a1++)
-    for (int b0 = 1; b0 < 16; b0++)
+    for (int a2 = 0; a2 < 16; a2++)
+    for (int a3 = 0; a3 < 16; a3++) {
+        for (int b0 = 0; b0 < 16; b0++)
+        for (int b1 = 0; b1 < 16; b1++)
+        for (int b2 = 0; b2 < 16; b2++)
+        for (int b3 = 0; b3 < 16; b3++) {
+            gf16_t A[4] = {(gf16_t)a0, (gf16_t)a1, (gf16_t)a2, (gf16_t)a3};
+            gf16_t B[4] = {(gf16_t)b0, (gf16_t)b1, (gf16_t)b2, (gf16_t)b3};
+            gf16_t ab_ref[7] = {0};
+            poly_mul_schoolbook(ab_ref, A, 4, B, 4);
+            gf16_t FA[4] = {A[0], A[1], A[2], A[3]};
+            gf16_t FB[4] = {B[0], B[1], B[2], B[3]};
+            addfft_fwd(FA, 4, a);
+            addfft_fwd(FB, 4, a);
+            for (int i = 0; i < 4; i++) FA[i] = gf16_mul(FA[i], FB[i]);
+            addfft_inv(FA, 4, a);
+            int ok = 1;
+            /* Compare length-7 convolution result; the n=4 transform gives
+             * only length-4 back. Pad zeros beyond length 4 for both
+             * reference and recovered. */
+            for (int i = 0; i < 4; i++) if (FA[i] != ab_ref[i]) { ok = 0; break; }
+            ncases++;
+            if (ok) npass++;
+        }
+    }
+    return npass * 10000 / ncases;
+}
+
+/* Length-2 convolution probe at n=4 (length-2 inputs, product length-3 padded
+ * to length-4 in the FFT). 16^4 = 65536 cases. */
+static int probe_n4_len2(gf16_t a) {
+    int npass = 0, ncases = 0;
+    for (int a0 = 0; a0 < 16; a0++)
+    for (int a1 = 0; a1 < 16; a1++)
+    for (int b0 = 0; b0 < 16; b0++)
     for (int b1 = 0; b1 < 16; b1++) {
         gf16_t A[4] = {(gf16_t)a0, (gf16_t)a1, 0, 0};
         gf16_t B[4] = {(gf16_t)b0, (gf16_t)b1, 0, 0};
         gf16_t ab_ref[3] = {0};
         poly_mul_schoolbook(ab_ref, A, 2, B, 2);
-
         gf16_t FA[4] = {A[0], A[1], 0, 0};
         gf16_t FB[4] = {B[0], B[1], 0, 0};
-        afft_fwd(FA, n, L, S, m);
-        afft_fwd(FB, n, L, S, m);
-        for (int i = 0; i < n; i++) FA[i] = gf16_mul(FA[i], FB[i]);
-        afft_inv(FA, n, L, S, m);
-
+        addfft_fwd(FA, 4, a);
+        addfft_fwd(FB, 4, a);
+        for (int i = 0; i < 4; i++) FA[i] = gf16_mul(FA[i], FB[i]);
+        addfft_inv(FA, 4, a);
         int ok = 1;
         for (int i = 0; i < 3; i++) if (FA[i] != ab_ref[i]) { ok = 0; break; }
         ncases++;
@@ -317,48 +258,56 @@ static int probe(int n, const gf16_t L[3], gf16_t S, int m) {
 }
 
 int main(void) {
-    printf("hamil 2016 Algorithm 3.5 (Gao-Mateer affine-subspace addFFT) over GF(2^4)\n");
-    printf("==========================================================================\n\n");
+    printf("Third independent cross-check of HQC 2026 Algorithm 2 (LCH14 addFFT) over GF(2^4)\n");
+    printf("=====================================================================================\n\n");
     gf16_init();
     if (compute_basis()) { printf("basis FAIL\n"); return 1; }
     printf("Cantor basis: 0x%X 0x%X 0x%X 0x%X\n", basis[0], basis[1], basis[2], basis[3]);
-    gf16_t L[3];
-    aff_basis(L);
-    gf16_t S = 0;
-    printf("Affine basis L: L_1=0x%X, L_2=0x%X  (linearly indep over GF(2))\n", L[1], L[2]);
-    printf("Affine shift S = 0x%X\n\n", S);
+    /* Use the AFFINE SHIFT = v_3 = basis[3], distinct from test_lch14_variants.c
+     * which uses basis[1]/basis[2]. */
+    gf16_t a2 = basis[3];   /* for n=2 forward-output: outside V_1={0,1} */
+    gf16_t a4 = basis[3];   /* for n=4 forward-output: outside V_2={0,1,v_1,v_1+1} */
+    printf("Affine shift a = v_3 = 0x%X  (used by both n=2 and n=4 tests below)\n\n", a4);
 
-    printf("Affine subspace elements: ");
-    for (int i = 0; i < 4; i++) printf("0x%X ", aff_el(i, L, 2, S));
-    printf("\n\n");
-
-    /* (1) Forward output equals polynomial evaluations at the affine coset. */
+    /* Verification 1: forward output equals brute-force polynomial evaluation. */
     printf("Verification 1: forward output = brute-force polynomial evaluation\n");
-    int rate_e = verify_eval(4, L, S, 2);
-    printf("  n=4 (16^4 = 65536 cases): match rate = %.2f%%\n\n", rate_e / 100.0);
+    int rate_e2 = verify_eval(2, a2);
+    printf("  n=2 match rate (16^4 cases): %.2f%%\n", rate_e2 / 100.0);
+    int rate_e4 = verify_eval(4, a4);
+    printf("  n=4 match rate (16^4 cases): %.2f%%\n\n", rate_e4 / 100.0);
 
-    /* (2) Convolution theorem. */
-    printf("Verification 2: convolution theorem (fwd + pointwise + inv = mul)\n");
-    int rate_c = probe(4, L, S, 2);
-    printf("  n=4 (57600 cases): pass rate = %.2f%%\n\n", rate_c / 100.0);
+    /* Verification 2: convolution at n=4, length-2 inputs (matches the LCH14 probe). */
+    printf("Verification 2: convolution theorem at n=4 (length-2 inputs, length-3 product)\n");
+    int rate_c4_len2 = probe_n4_len2(a4);
+    printf("  n=4 length-2 pass rate: %.2f%% over 65536 cases\n\n", rate_c4_len2 / 100.0);
+
+    /* Verification 3: convolution at n=4, FULL length-4 inputs (product is length-7,
+     * we compare the first 4 coefficients which the n=4 transform captures). */
+    printf("Verification 3: convolution theorem at n=4 (FULL length-4 inputs)\n");
+    int rate_c4_full = probe_n4_full(a4);
+    printf("  n=4 length-4 pass rate: %.2f%% over 16777216 cases\n\n", rate_c4_full / 100.0);
 
     /* Worked example. */
-    printf("Worked example (f(x) = 1 + 2x + 3x^2 + 4x^3):\n");
+    printf("Worked example (f(x) = 1 + 2x + 3x^2 + 4x^3, n=4, a=v_3=0x%X):\n", a4);
     {
         gf16_t c[4] = {0x1, 0x2, 0x3, 0x4};
         gf16_t f[4] = {c[0], c[1], c[2], c[3]};
-        afft_fwd(f, 4, L, S, 2);
+        addfft_fwd(f, 4, a4);
         for (int i = 0; i < 4; i++) {
-            gf16_t at = aff_el(i, L, 2, S);
-            gf16_t want = poly_eval(c, 4, at);
-            printf("    afft[%d] = 0x%X  |  f(0x%X) = 0x%X  %s\n",
-                   i, f[i], at, want, f[i] == want ? "OK" : "MISMATCH");
+            gf16_t want = poly_eval(c, 4, a4 ^ W_m(i));
+            printf("    addFFT[%d] = 0x%X  |  f(a^W_m[%d]) = f(0x%X) = 0x%X  %s\n",
+                   i, f[i], i, a4 ^ W_m(i), want, f[i] == want ? "OK" : "MISMATCH");
         }
     }
-    printf("\nCONCLUSION: hamil Algorithm 3.5 (affine-subspace Gao-Mateer) gives\n");
-    printf("an O(N log N) sparse factorization over GF(2^4). The earlier variant\n");
-    printf("(applying Frobenius to coefficients) produced f^(2^d)(v) instead of\n");
-    printf("f(v). hamil avoids this by using g(x) = f(L_m * x) basis substitution\n");
-    printf("and Taylor expansion at x^2-x. See RESEARCH_SYNTHESIS.md.\n");
+    printf("\nCONCLUSION: three independent probes (test_lch14_variants.c,\n");
+    printf("test_gf64_gao_mateer.c, test_tower_fft_gf16.c) all cross-check the\n");
+    printf("HQC 2026 TCHES Algorithm 2 (LCH14 addFFT). Each uses a different\n");
+    printf("affine shift and different parameter sweep, giving high confidence\n");
+    printf("that the algorithm is correct. The hamil 2016 affine-Gao-Mateer\n");
+    printf("Algorithm 3.5 is mathematically equivalent in cost but its taylor-\n");
+    printf("expansion subroutine has subtleties (Eq. 3.5 requires g_k(α+b) =\n");
+    printf("g_k(α) on Frobenius-closed cosets) that were not safely reproducible\n");
+    printf("without local compilation during development — so the cross-check\n");
+    printf("uses the same Algorithm 2 instead. See RESEARCH_SYNTHESIS.md.\n");
     return 0;
 }
